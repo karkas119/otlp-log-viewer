@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opentelemetry/otlp-transformer": "^0.57.2",
+    "@opentelemetry/otlp-transformer": "0.56.0",
     "next": "15.5.16",
     "react": "19.0.0",
     "react-dom": "19.0.0"
