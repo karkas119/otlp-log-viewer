@@ -1,60 +1,37 @@
 import type {
-  AnyValue,
-  ExportLogsServiceRequest,
-  KeyValue,
-  LogRecord,
-  Resource,
-  ResourceLogs,
-  ScopeLogs,
-  SeverityBand,
-} from "./types";
+  IAnyValue,
+  IExportLogsServiceRequest,
+  IKeyValue,
+  ILogRecord,
+  IResource,
+  IResourceLogs,
+  IScopeLogs,
+} from "@opentelemetry/otlp-transformer";
+
+// ---------------------------------------------------------------------------
+// Severity bands
+// ---------------------------------------------------------------------------
 
 /**
- * A single log record flattened with enough parent context to render and
- * search without re-walking the OTLP tree.
+ * Display grouping of the OTel severity numbers (1-24) into 7 bands per
+ * https://opentelemetry.io/docs/specs/otel/logs/data-model/#field-severitynumber
+ *
+ * Declared as an array first so `SeverityBand`, `emptyBandCounts`, and any
+ * future iteration order all share one source of truth.
  */
-export interface FlatLogRow {
-  /** Stable id across re-renders: resourceIdx.scopeIdx.recordIdx. */
-  id: string;
-  /** Milliseconds since epoch (nano precision lost; fine for display/buckets). */
-  timestampMs: number;
-  severityNumber: number;
-  severityText: string;
-  severityBand: SeverityBand;
-  body: string;
-  attributes: KeyValue[];
-  resource: Resource | undefined;
-  resourceAttrs: Record<string, string>;
-  scopeName: string | undefined;
-  scopeVersion: string | undefined;
-  scopeAttrs: KeyValue[];
-  /** Stable id derived from resource attributes (service.name/namespace). */
-  resourceKey: string;
-  resourceLabel: string;
-  raw: LogRecord;
-}
+export const SEVERITY_BANDS = [
+  "UNSPECIFIED",
+  "TRACE",
+  "DEBUG",
+  "INFO",
+  "WARN",
+  "ERROR",
+  "FATAL",
+] as const;
 
-export interface ResourceGroup {
-  key: string;
-  label: string;
-  /** namespace / name / version pulled out for chips. */
-  serviceName: string | undefined;
-  serviceNamespace: string | undefined;
-  serviceVersion: string | undefined;
-  resourceAttrs: Record<string, string>;
-  rows: FlatLogRow[];
-}
+export type SeverityBand = (typeof SEVERITY_BANDS)[number];
 
-const SEV_BAND_BY_FIRST_CHAR: Record<string, SeverityBand> = {
-  T: "TRACE",
-  D: "DEBUG",
-  I: "INFO",
-  W: "WARN",
-  E: "ERROR",
-  F: "FATAL",
-};
-
-/** Map OTel severity number (1-24) to one of the 7 display bands. */
+/** Map severityNumber (0-24) → band. 0 or undefined → UNSPECIFIED. */
 export function severityBandFromNumber(n: number | undefined): SeverityBand {
   if (!n || n <= 0) return "UNSPECIFIED";
   if (n <= 4) return "TRACE";
@@ -65,206 +42,291 @@ export function severityBandFromNumber(n: number | undefined): SeverityBand {
   return "FATAL";
 }
 
-export function severityBand(rec: LogRecord): SeverityBand {
-  // Prefer severityText when present; fall back to severityNumber.
-  const t = rec.severityText?.toUpperCase();
-  if (t && t[0] && SEV_BAND_BY_FIRST_CHAR[t[0]]) {
-    return SEV_BAND_BY_FIRST_CHAR[t[0]];
+/**
+ * Pull a band out of severityText. Works because every OTel severity text
+ * starts with a unique letter (TRACE/DEBUG/INFO/WARN/ERROR/FATAL), so values
+ * like "INFO2" or "ERROR4" still map cleanly.
+ */
+function severityBandFromText(text: string | undefined): SeverityBand | null {
+  if (!text) return null;
+  const first = text[0]?.toUpperCase();
+  switch (first) {
+    case "T": return "TRACE";
+    case "D": return "DEBUG";
+    case "I": return "INFO";
+    case "W": return "WARN";
+    case "E": return "ERROR";
+    case "F": return "FATAL";
+    default: return null;
   }
-  return severityBandFromNumber(rec.severityNumber);
 }
 
-/** Render AnyValue for display. Kept intentionally small; we're not rebuilding a REPL. */
-export function renderAnyValue(v: AnyValue | undefined): string {
-  if (v === undefined || v === null) return "";
+/** Prefer severityText when present; fall back to severityNumber. */
+export function severityBand(rec: ILogRecord): SeverityBand {
+  return severityBandFromText(rec.severityText) ?? severityBandFromNumber(rec.severityNumber);
+}
+
+// ---------------------------------------------------------------------------
+// AnyValue rendering
+// ---------------------------------------------------------------------------
+
+/** Render an OTLP AnyValue for display. Intentionally not a full JSON dump. */
+export function renderAnyValue(v: IAnyValue | undefined): string {
+  if (v == null) return "";
   if (v.stringValue != null) return v.stringValue;
   if (v.boolValue != null) return String(v.boolValue);
   if (v.intValue != null) return String(v.intValue);
   if (v.doubleValue != null) return String(v.doubleValue);
   if (v.arrayValue) {
-    return `[${v.arrayValue.values.map(renderAnyValue).join(", ")}]`;
+    const parts = v.arrayValue.values.map(renderAnyValue);
+    return `[${parts.join(", ")}]`;
   }
   if (v.kvlistValue) {
-    const inner = v.kvlistValue.values
-      .map((kv) => `${kv.key}: ${renderAnyValue(kv.value)}`)
-      .join(", ");
-    return `{${inner}}`;
+    const parts = v.kvlistValue.values.map((kv) => `${kv.key}: ${renderAnyValue(kv.value)}`);
+    return `{${parts.join(", ")}}`;
   }
   if (v.bytesValue) return `<${v.bytesValue.length} bytes>`;
   return "";
 }
 
-export function attributesToRecord(attrs: KeyValue[] | undefined): Record<string, string> {
+/** Flatten an IKeyValue[] into a plain string-valued record for display. */
+export function attributesToRecord(attrs: IKeyValue[] | undefined): Record<string, string> {
   const out: Record<string, string> = {};
-  if (!attrs) return out;
-  for (const kv of attrs) {
+  for (const kv of attrs ?? []) {
     out[kv.key] = renderAnyValue(kv.value);
   }
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Timestamp conversion
+// ---------------------------------------------------------------------------
+
 /**
- * Convert OTLP nano timestamp (string) to JS ms.
- * timeUnixNano is sent as a string because uint64 can overflow JS Number,
- * but after /1e6 a sensible ms value fits comfortably.
+ * Convert an OTLP nanosecond timestamp to JS milliseconds.
+ *
+ * The OTLP `Fixed64` shape is `string | number | { low, high }`. JSON wire
+ * format always sends it as a string because uint64 overflows `Number`.
+ * Returns 0 on invalid input rather than throwing — a bad row shouldn't
+ * knock out the whole list.
  */
-export function nanoToMs(nano: string | number | undefined): number {
-  if (nano === undefined || nano === null) return 0;
+export function nanoToMs(nano: unknown): number {
+  if (nano == null) return 0;
   if (typeof nano === "number") return Math.floor(nano / 1e6);
-  // String path: divide by 1e6 using BigInt to avoid precision loss.
+  if (typeof nano === "string") return nanoStringToMs(nano);
+  if (isLongBits(nano)) return longBitsToMs(nano);
+  return 0;
+}
+
+function nanoStringToMs(s: string): number {
   try {
-    return Number(BigInt(nano) / 1_000_000n);
+    return Number(BigInt(s) / 1_000_000n);
   } catch {
-    // Fallback: best-effort parse.
-    const n = Number(nano);
+    const n = Number(s);
     return Number.isFinite(n) ? Math.floor(n / 1e6) : 0;
   }
 }
 
-function resourceKeyFor(attrs: Record<string, string>): string {
-  // Identity = namespace + name. Version is part of the label, not the key,
-  // so re-deploys of the same service still group together.
-  const ns = attrs["service.namespace"] ?? "";
-  const name = attrs["service.name"] ?? "unknown_service";
-  return `${ns}|${name}`;
+function longBitsToMs({ low, high }: { low: number; high: number }): number {
+  const nanos = (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0);
+  return Number(nanos / 1_000_000n);
 }
 
-function resourceLabelFor(attrs: Record<string, string>): string {
-  const ns = attrs["service.namespace"];
-  const name = attrs["service.name"] ?? "unknown_service";
-  return ns ? `${ns} / ${name}` : name;
+function isLongBits(v: unknown): v is { low: number; high: number } {
+  return typeof v === "object" && v !== null && "low" in v && "high" in v;
 }
 
-/** Flatten an OTLP request into one row per LogRecord, sorted newest-first. */
-export function flattenLogs(request: ExportLogsServiceRequest): FlatLogRow[] {
+// ---------------------------------------------------------------------------
+// Flattening
+// ---------------------------------------------------------------------------
+
+/**
+ * A single log record joined with its resource + scope context so downstream
+ * components don't need to re-walk the nested OTLP tree.
+ */
+export interface FlatLogRow {
+  /** Stable id across re-renders: `resourceIdx.scopeIdx.recordIdx`. */
+  id: string;
+  /** Milliseconds since epoch (sub-ms precision from nanos is discarded). */
+  timestampMs: number;
+  severityNumber: number;
+  severityText: string;
+  severityBand: SeverityBand;
+  body: string;
+  attributes: IKeyValue[];
+  resource: IResource | undefined;
+  resourceAttrs: Record<string, string>;
+  scopeName: string | undefined;
+  scopeVersion: string | undefined;
+  scopeAttrs: IKeyValue[];
+  /** Group key: `service.namespace|service.name` (version excluded on purpose). */
+  resourceKey: string;
+  resourceLabel: string;
+  raw: ILogRecord;
+}
+
+/** Pre-computed resource-level context, reused for every record in a resource. */
+interface ResourceContext {
+  resource: IResource | undefined;
+  resourceAttrs: Record<string, string>;
+  resourceKey: string;
+  resourceLabel: string;
+}
+
+function buildResourceContext(rl: IResourceLogs): ResourceContext {
+  const resourceAttrs = attributesToRecord(rl.resource?.attributes);
+  const ns = resourceAttrs["service.namespace"] ?? "";
+  const name = resourceAttrs["service.name"] ?? "unknown_service";
+  return {
+    resource: rl.resource,
+    resourceAttrs,
+    // Version is intentionally excluded so that re-deployed services still
+    // group under the same key.
+    resourceKey: `${ns}|${name}`,
+    resourceLabel: ns ? `${ns} / ${name}` : name,
+  };
+}
+
+function toFlatRow(
+  rec: ILogRecord,
+  scope: IScopeLogs,
+  ctx: ResourceContext,
+  ids: { resourceIdx: number; scopeIdx: number; recordIdx: number },
+): FlatLogRow {
+  return {
+    id: `${ids.resourceIdx}.${ids.scopeIdx}.${ids.recordIdx}`,
+    timestampMs: nanoToMs(rec.timeUnixNano),
+    severityNumber: rec.severityNumber ?? 0,
+    severityText: rec.severityText ?? "",
+    severityBand: severityBand(rec),
+    body: renderAnyValue(rec.body),
+    attributes: rec.attributes ?? [],
+    scopeName: scope.scope?.name,
+    scopeVersion: scope.scope?.version,
+    scopeAttrs: scope.scope?.attributes ?? [],
+    ...ctx,
+    raw: rec,
+  };
+}
+
+/** Walk resourceLogs → scopeLogs → logRecords and return newest-first rows. */
+export function flattenLogs(request: IExportLogsServiceRequest): FlatLogRow[] {
   const rows: FlatLogRow[] = [];
-  const resourceLogs: ResourceLogs[] = request.resourceLogs ?? [];
 
-  resourceLogs.forEach((rl, ri) => {
-    const resourceAttrs = attributesToRecord(rl.resource?.attributes);
-    const resourceKey = resourceKeyFor(resourceAttrs);
-    const resourceLabel = resourceLabelFor(resourceAttrs);
-    const scopes: ScopeLogs[] = rl.scopeLogs ?? [];
-    scopes.forEach((sl, si) => {
-      const records: LogRecord[] = sl.logRecords ?? [];
-      records.forEach((rec, li) => {
-        rows.push({
-          id: `${ri}.${si}.${li}`,
-          timestampMs: nanoToMs(rec.timeUnixNano),
-          severityNumber: rec.severityNumber ?? 0,
-          severityText: rec.severityText ?? "",
-          severityBand: severityBand(rec),
-          body: renderAnyValue(rec.body),
-          attributes: rec.attributes ?? [],
-          resource: rl.resource,
-          resourceAttrs,
-          scopeName: sl.scope?.name,
-          scopeVersion: sl.scope?.version,
-          scopeAttrs: sl.scope?.attributes ?? [],
-          resourceKey,
-          resourceLabel,
-          raw: rec,
-        });
-      });
-    });
-  });
+  const resourceLogsList = request.resourceLogs ?? [];
+  for (let ri = 0; ri < resourceLogsList.length; ri++) {
+    const rl = resourceLogsList[ri];
+    const ctx = buildResourceContext(rl);
+    const scopes = rl.scopeLogs ?? [];
+    for (let si = 0; si < scopes.length; si++) {
+      const scope = scopes[si];
+      const records = scope.logRecords ?? [];
+      for (let li = 0; li < records.length; li++) {
+        rows.push(toFlatRow(records[li], scope, ctx, {
+          resourceIdx: ri,
+          scopeIdx: si,
+          recordIdx: li,
+        }));
+      }
+    }
+  }
 
-  rows.sort((a, b) => b.timestampMs - a.timestampMs);
-  return rows;
+  return rows.sort((a, b) => b.timestampMs - a.timestampMs);
 }
 
-/** Group flattened rows by resource identity (service.namespace + service.name). */
+// ---------------------------------------------------------------------------
+// Grouping by resource
+// ---------------------------------------------------------------------------
+
+export interface ResourceGroup {
+  key: string;
+  label: string;
+  serviceName: string | undefined;
+  serviceNamespace: string | undefined;
+  serviceVersion: string | undefined;
+  resourceAttrs: Record<string, string>;
+  rows: FlatLogRow[];
+}
+
+function newGroup(row: FlatLogRow): ResourceGroup {
+  return {
+    key: row.resourceKey,
+    label: row.resourceLabel,
+    serviceName: row.resourceAttrs["service.name"],
+    serviceNamespace: row.resourceAttrs["service.namespace"],
+    serviceVersion: row.resourceAttrs["service.version"],
+    resourceAttrs: row.resourceAttrs,
+    rows: [],
+  };
+}
+
+/** Group rows by resource identity, sorted by row count (chattiest first). */
 export function groupByResource(rows: FlatLogRow[]): ResourceGroup[] {
   const byKey = new Map<string, ResourceGroup>();
   for (const row of rows) {
-    let g = byKey.get(row.resourceKey);
-    if (!g) {
-      g = {
-        key: row.resourceKey,
-        label: row.resourceLabel,
-        serviceName: row.resourceAttrs["service.name"],
-        serviceNamespace: row.resourceAttrs["service.namespace"],
-        serviceVersion: row.resourceAttrs["service.version"],
-        resourceAttrs: row.resourceAttrs,
-        rows: [],
-      };
-      byKey.set(row.resourceKey, g);
+    let group = byKey.get(row.resourceKey);
+    if (!group) {
+      group = newGroup(row);
+      byKey.set(row.resourceKey, group);
     }
-    g.rows.push(row);
+    group.rows.push(row);
   }
-  // Sort groups by row count desc (most chatty services first).
-  return Array.from(byKey.values()).sort((a, b) => b.rows.length - a.rows.length);
+  return [...byKey.values()].sort((a, b) => b.rows.length - a.rows.length);
 }
 
+// ---------------------------------------------------------------------------
+// Histogram bucketing
+// ---------------------------------------------------------------------------
+
 export interface HistogramBucket {
-  /** Bucket start in ms. */
+  /** Bucket start (ms, inclusive). */
   t0: number;
-  /** Bucket end in ms (exclusive). */
+  /** Bucket end (ms, exclusive). */
   t1: number;
   total: number;
   byBand: Record<SeverityBand, number>;
 }
 
-export const SEVERITY_BANDS: readonly SeverityBand[] = [
-  "UNSPECIFIED",
-  "TRACE",
-  "DEBUG",
-  "INFO",
-  "WARN",
-  "ERROR",
-  "FATAL",
-] as const;
-
 function emptyBandCounts(): Record<SeverityBand, number> {
-  return {
-    UNSPECIFIED: 0,
-    TRACE: 0,
-    DEBUG: 0,
-    INFO: 0,
-    WARN: 0,
-    ERROR: 0,
-    FATAL: 0,
-  };
+  // Built from SEVERITY_BANDS so adding a band in one place propagates here.
+  return Object.fromEntries(SEVERITY_BANDS.map((b) => [b, 0])) as Record<SeverityBand, number>;
 }
 
-/**
- * Bucket rows into `bucketCount` fixed-width intervals spanning [min, max].
- * Returns empty buckets for ranges with no rows (so bars align with x-axis).
- */
-export function bucketRows(
-  rows: FlatLogRow[],
-  bucketCount: number,
-): HistogramBucket[] {
-  if (rows.length === 0 || bucketCount <= 0) return [];
+function timeBounds(rows: FlatLogRow[]): { min: number; max: number } | null {
+  if (rows.length === 0) return null;
   let min = Infinity;
   let max = -Infinity;
   for (const r of rows) {
     if (r.timestampMs < min) min = r.timestampMs;
     if (r.timestampMs > max) max = r.timestampMs;
   }
-  if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+  // Nudge max when all rows share a timestamp, so the single row lands inside a bucket.
+  return { min, max: min === max ? min + 1 : max };
+}
 
-  // Pad a tiny amount so the max row lands inside the last bucket.
-  if (min === max) max = min + 1;
-  const span = max - min;
-  const width = Math.ceil(span / bucketCount);
-  const buckets: HistogramBucket[] = [];
-  for (let i = 0; i < bucketCount; i++) {
-    buckets.push({
-      t0: min + i * width,
-      t1: min + (i + 1) * width,
-      total: 0,
-      byBand: emptyBandCounts(),
-    });
-  }
-  for (const r of rows) {
-    const idx = Math.min(
-      bucketCount - 1,
-      Math.floor((r.timestampMs - min) / width),
-    );
-    const b = buckets[idx];
-    b.total += 1;
-    b.byBand[r.severityBand] += 1;
+/**
+ * Bucket rows into `bucketCount` equal-width intervals spanning the full
+ * time range. Empty intervals are included so bars align with the x-axis.
+ */
+export function bucketRows(rows: FlatLogRow[], bucketCount: number): HistogramBucket[] {
+  if (bucketCount <= 0) return [];
+  const bounds = timeBounds(rows);
+  if (!bounds) return [];
+
+  const width = Math.ceil((bounds.max - bounds.min) / bucketCount);
+  const buckets: HistogramBucket[] = Array.from({ length: bucketCount }, (_, i) => ({
+    t0: bounds.min + i * width,
+    t1: bounds.min + (i + 1) * width,
+    total: 0,
+    byBand: emptyBandCounts(),
+  }));
+
+  for (const row of rows) {
+    const idx = Math.min(bucketCount - 1, Math.floor((row.timestampMs - bounds.min) / width));
+    const bucket = buckets[idx];
+    bucket.total += 1;
+    bucket.byBand[row.severityBand] += 1;
   }
   return buckets;
 }

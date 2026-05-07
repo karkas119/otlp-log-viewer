@@ -4,8 +4,7 @@ import { useMemo, useState } from "react";
 
 import { LogTable } from "./LogTable";
 import { SEVERITY_BANDS, groupByResource } from "@/lib/otlp/transform";
-import type { FlatLogRow, ResourceGroup } from "@/lib/otlp/transform";
-import type { SeverityBand } from "@/lib/otlp/types";
+import type { FlatLogRow, ResourceGroup, SeverityBand } from "@/lib/otlp/transform";
 
 interface GroupedLogListProps {
   rows: FlatLogRow[];

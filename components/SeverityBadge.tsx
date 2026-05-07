@@ -1,4 +1,4 @@
-import type { SeverityBand } from "@/lib/otlp/types";
+import type { SeverityBand } from "@/lib/otlp/transform";
 
 const BAND_STYLES: Record<SeverityBand, string> = {
   UNSPECIFIED: "bg-slate-200 text-slate-700 ring-slate-300",

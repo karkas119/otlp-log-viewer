@@ -4,8 +4,7 @@ import { useMemo, useState } from "react";
 
 import { formatTimestamp } from "@/lib/format";
 import { bucketRows, SEVERITY_BANDS } from "@/lib/otlp/transform";
-import type { FlatLogRow } from "@/lib/otlp/transform";
-import type { SeverityBand } from "@/lib/otlp/types";
+import type { FlatLogRow, SeverityBand } from "@/lib/otlp/transform";
 
 interface HistogramProps {
   rows: FlatLogRow[];

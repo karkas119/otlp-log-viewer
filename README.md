@@ -48,8 +48,8 @@ components/
   SeverityBadge.tsx   Severity pill with band-based colour
   AttributesGrid.tsx  Key/value grid used for all attribute blocks
 lib/
-  otlp/types.ts       Local OTLP JSON types (see "OTLP types" below)
   otlp/transform.ts   flatten / groupByResource / bucketRows / severityBand helpers
+                      + local SeverityBand display type
   hooks/useLogs.ts    Tiny fetch hook with loading / error / refresh
   format.ts           Timestamp helpers
 ```
@@ -68,14 +68,20 @@ lib/
 
 ### OTLP types
 
-The OTLP JSON types live in `lib/otlp/types.ts`. I started pulling them from
-`@opentelemetry/otlp-transformer`, but the `I*` interfaces there are
-internal — they're not in the package's public export map. Rather than
-reach into the package's build output (brittle across versions), I defined
-the small subset we actually consume against the
-[proto definitions](https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/logs/v1/logs.proto).
-The package still shows up as a dependency because it documents the canonical
-shape and would be the first choice if those types become public.
+Imported directly from `@opentelemetry/otlp-transformer`, pinned to
+**`0.56.0`**. That's the last release where the log-side request types
+(`IExportLogsServiceRequest`, `IResourceLogs`, `ILogRecord`, etc.) are
+part of the public export map — from `0.57.0` they were moved to
+`internal-types.d.ts` and dropped from the package exports.
+
+Pinning the exact version means we consume the canonical, maintained
+OTLP type definitions without duplicating them in the repo. The pin is
+narrow (no caret) so a future `npm install` won't silently pull in a
+release where the imports stop resolving.
+
+The one locally-defined type is `SeverityBand` in `lib/otlp/transform.ts` —
+a display grouping of the 24 OTel severity numbers into 7 bands. It lives
+next to the transform helpers that produce and consume it.
 
 ### Severity handling
 

@@ -2,12 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { ExportLogsServiceRequest } from "@/lib/otlp/types";
+import type { IExportLogsServiceRequest } from "@opentelemetry/otlp-transformer";
 
 export type FetchState = "idle" | "loading" | "success" | "error";
 
 export interface UseLogsResult {
-  data: ExportLogsServiceRequest | null;
+  data: IExportLogsServiceRequest | null;
   state: FetchState;
   error: string | null;
   /** Timestamp (ms) of the most recent successful load — useful for a "last fetched" chip. */
@@ -21,7 +21,7 @@ export interface UseLogsResult {
  * the refresh UX; adopting a query library for one endpoint would be overkill.
  */
 export function useLogs(): UseLogsResult {
-  const [data, setData] = useState<ExportLogsServiceRequest | null>(null);
+  const [data, setData] = useState<IExportLogsServiceRequest | null>(null);
   const [state, setState] = useState<FetchState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
@@ -39,7 +39,7 @@ export function useLogs(): UseLogsResult {
         const payload = await res.json().catch(() => ({}));
         throw new Error(payload?.error ?? `Request failed with ${res.status}`);
       }
-      const body = (await res.json()) as ExportLogsServiceRequest;
+      const body = (await res.json()) as IExportLogsServiceRequest;
       if (id !== requestIdRef.current) return; // superseded
       setData(body);
       setState("success");

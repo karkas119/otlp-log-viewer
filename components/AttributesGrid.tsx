@@ -1,9 +1,9 @@
 import { renderAnyValue } from "@/lib/otlp/transform";
-import type { KeyValue } from "@/lib/otlp/types";
+import type { IKeyValue } from "@opentelemetry/otlp-transformer";
 
 interface AttributesGridProps {
   title: string;
-  attributes: KeyValue[];
+  attributes: IKeyValue[];
   /** Empty-state message when attributes is empty. */
   emptyMessage?: string;
 }
@@ -41,7 +41,7 @@ export function AttributesGrid({
 }
 
 /** Simple record → array helper for resource attrs (already flattened to strings). */
-export function recordToKeyValues(rec: Record<string, string>): KeyValue[] {
+export function recordToKeyValues(rec: Record<string, string>): IKeyValue[] {
   return Object.entries(rec).map(([key, value]) => ({
     key,
     value: { stringValue: value },
